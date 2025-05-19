@@ -1,39 +1,35 @@
 class Song {
   final String id;
-  final String title;
-  final String artist;
-  final List<Map<String, dynamic>> fingerprints;
-  final DateTime createdAt;
-  final String? audioPath;
+  final String name;
+  final int duration;
 
   Song({
     required this.id,
-    required this.title,
-    required this.artist,
-    required this.fingerprints,
-    required this.createdAt,
-    this.audioPath,
+    required this.name,
+    required this.duration,
   });
 
   factory Song.fromJson(Map<String, dynamic> json) {
     return Song(
       id: json['id'] as String,
-      title: json['title'] as String,
-      artist: json['artist'] as String,
-      fingerprints: List<Map<String, dynamic>>.from(json['fingerprints']),
-      createdAt: DateTime.parse(json['createdAt'] as String),
-      audioPath: json['audioPath'],
+      name: json['name'] as String,
+      duration: json['duration'] as int,
+    );
+  }
+
+  factory Song.fromApiResponse(Map<String, dynamic> json) {
+    return Song(
+      id: json['songId'],
+      name: json['songName'],
+      duration: json['duration'] as int,
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'title': title,
-      'artist': artist,
-      'fingerprints': fingerprints,
-      'createdAt': createdAt.toIso8601String(),
-      'audioPath': audioPath,
+      'name': name,
+      'duration': duration,
     };
   }
 }

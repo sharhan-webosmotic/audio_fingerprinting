@@ -1,31 +1,36 @@
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'dart:math' as math;
+import 'api_service.dart';
 import 'package:fftea/fftea.dart';
 
-class Complex {
-  final double x;
-  final double y;
-  Complex(this.x, this.y);
-}
-
 class AudioFingerprintService {
-  final _record = AudioRecorder();
-  late final String _tempDir;
+  late String _tempDir;
   bool _isRecording = false;
   String? _recordedAudioPath;
+  final _record = AudioRecorder();
+
+  // Audio processing constants
+  static const int _sampleRate = 44100;    // Standard audio sample rate
+  static const int _chunkSize = 2048;      // Larger window for better frequency resolution
+  static const int _hopSize = 512;         // 75% overlap for better time resolution
   
-  // Optimized audio settings
-  static const int _sampleRate = 44100;  // Standard audio sample rate
-  static const int _chunkSize = 2048;    // Good balance for FFT
-  static const int _hopSize = 512;       // 75% overlap
-  static const double _peakThreshold = 0.3;  // Adjusted threshold
-  static const int _fanout = 15;
-  static const int _minPeaks = 3;  // Minimum peaks needed to generate fingerprints
-  static const int _targetZoneSize = 5; // Number of points to pair with each anchor
+  // Frequency bands (critical bands approximating human hearing)
+  static const List<int> _bandEdges = [
+    0,    100,  200,  300,  400,  510,  630,  770,  920,  1080,
+    1270, 1480, 1720, 2000, 2320, 2700, 3150, 3700, 4400, 5300,
+    6400, 7700, 9500, 12000, 15500
+  ];
   
+  // Peak detection parameters
+  static const double _peakThreshold = 0.4;   // Higher threshold for stronger peaks
+  static const int _minPeakSpacing = 12;      // More spacing between peaks
+  static const int _targetZoneSize = 5;       // Number of points to pair with each anchor
+  static const int _minFreqBin = 10;          // Skip very low frequencies (< ~215 Hz)
+  static const double _noiseFloor = 0.1;      // Higher noise floor to filter weak signals
+
   AudioFingerprintService() {
     _initTempDir();
   }
@@ -35,63 +40,53 @@ class AudioFingerprintService {
     _tempDir = dir.path;
   }
 
-  Future<String> recordAudio({int seconds = 10}) async {
+  Future<String?> recordAudio({int seconds = 10}) async {
+    
     final filePath = '$_tempDir/recording_${DateTime.now().millisecondsSinceEpoch}.wav';
     
-    if (await _record.hasPermission()) {
-      try {
-        // Configure higher quality recording
+    try {
+      if (await _record.hasPermission()) {
         await _record.start(
-          RecordConfig(
+          const RecordConfig(
             encoder: AudioEncoder.wav,
             sampleRate: _sampleRate,
             numChannels: 1,
-            bitRate: 256000, // Higher bitrate
-            autoGain: true, // Enable auto gain
           ),
           path: filePath,
         );
         
         await Future.delayed(Duration(seconds: seconds));
         await _record.stop();
-        
-        // Verify the recorded file
-        final file = File(filePath);
-        if (await file.exists()) {
-          final size = await file.length();
-          print('Recording saved: $filePath (${size ~/ 1024} KB)');
-          return filePath;
-        } else {
-          throw Exception('Recording file not created');
-        }
-      } catch (e) {
-        print('Recording error: $e');
-        rethrow;
+        return filePath;
       }
+    } catch (e) {
+      print('Error recording audio: $e');
     }
-    throw Exception('Microphone permission not granted');
+    return null;
   }
 
-  Future<String> startRecording() async {
-    _isRecording = true;
+  Future<String?> startRecording() async {
+    if (_isRecording) return null;
+    
     final tempDir = await getTemporaryDirectory();
+    _isRecording = true;
     _recordedAudioPath = '${tempDir.path}/recorded_audio.wav';
     
     try {
       await _record.start(
-        RecordConfig(
+        const RecordConfig(
           encoder: AudioEncoder.wav,
           sampleRate: _sampleRate,
           numChannels: 1,
-          bitRate: 256000, // Higher bitrate
-          autoGain: true, // Enable auto gain
         ),
         path: _recordedAudioPath!,
       );
       return _recordedAudioPath!;
     } catch (e) {
+      _isRecording = false;
+      _recordedAudioPath = null;
       print('Error starting recording: $e');
-      rethrow;
+      return null;
     }
   }
 
@@ -108,138 +103,235 @@ class AudioFingerprintService {
     }
   }
 
-  Future<List<Map<String, dynamic>>> generateFingerprint(String audioPath) async {
-    final file = File(audioPath);
-    final bytes = await file.readAsBytes();
-    
-    print('File size: ${bytes.length} bytes');
-    
-    // Convert to mono 16-bit PCM
-    List<double> samples = [];
-    double maxSample = 0.0;
-    
-    // Skip WAV header
-    for (int i = 44; i < bytes.length - 1; i += 2) {
-      final int sample = bytes[i] | (bytes[i + 1] << 8);
-      final double signedSample = (sample > 32767 ? sample - 65536 : sample).toDouble();
-      maxSample = max(maxSample, signedSample.abs());
-      samples.add(signedSample);
-    }
-    
-    print('Max sample value: $maxSample');
-    
-    // Normalize samples
-    if (maxSample > 0) {
-      for (int i = 0; i < samples.length; i++) {
-        samples[i] = samples[i] / maxSample;
-      }
+  final ApiService _apiService = ApiService();
+
+  Future<List<Map<String, dynamic>>> generateFingerprint(String? audioPath) async {
+    if (audioPath == null) {
+      throw Exception('Audio path cannot be null');
     }
 
-    final fingerprints = <Map<String, dynamic>>[];
+    try {
+      final result = await _apiService.matchAudio(audioPath);
+      
+      // Convert backend response to our format
+      return [{
+        'match': result['match'],
+        'song': result['song'],
+        'confidence': result['confidence'],
+      }];
+    } catch (e) {
+      print('Error matching audio: $e');
+      rethrow;
+    }
+    final file = File(audioPath);
+    if (!await file.exists()) {
+      throw Exception('Audio file not found');
+    }
+
+    final bytes = await file.readAsBytes();
+    final samples = List<double>.filled(bytes.length ~/ 2, 0);
+    
+    // Convert bytes to samples
+    for (var i = 0; i < bytes.length - 1; i += 2) {
+      final sample = bytes[i] | (bytes[i + 1] << 8);
+      samples[i ~/ 2] = (sample < 32768 ? sample : sample - 65536) / 32768.0;
+    }
+
+    print('File size: ${bytes.length} bytes');
+    print('Max sample value: ${samples.reduce(max).abs()}');
+
     final fft = FFT(_chunkSize);
     final window = List<double>.generate(_chunkSize, 
       (i) => 0.54 - 0.46 * cos(2 * pi * i / (_chunkSize - 1)));
 
-    int totalPeaks = 0;
-    int processedChunks = 0;
-    
-    // Store all peaks first
+    final fingerprints = <Map<String, dynamic>>[];
     final allPeaks = <Point<int>>[];
-
-    // Process chunks
-    for (var i = 0; i < samples.length - _chunkSize; i += _hopSize) {
+    var processedChunks = 0;
+    
+    // Process audio in overlapping chunks with adaptive window size
+    var i = 0;
+    while (i < samples.length - _chunkSize) {
       processedChunks++;
       
-      // Apply window and prepare samples
-      final chunk = List<double>.filled(_chunkSize, 0.0);
-      double maxChunkValue = 0.0;
-      
+      // Check signal energy in current window
+      var windowEnergy = 0.0;
       for (var j = 0; j < _chunkSize; j++) {
-        if (i + j < samples.length) {
-          chunk[j] = samples[i + j] * window[j];
-          maxChunkValue = max(maxChunkValue, chunk[j].abs());
-        }
+        windowEnergy += samples[i + j] * samples[i + j];
+      }
+      windowEnergy /= _chunkSize;
+      
+      // Skip low energy regions
+      if (windowEnergy < 0.001) {
+        i += _chunkSize;
+        continue;
       }
       
-      // Skip silent chunks
-      if (maxChunkValue < 0.001) continue;
-
+      // Apply window function
+      final chunk = List<double>.filled(_chunkSize, 0.0);
+      
+      // Copy samples and apply window
+      for (var j = 0; j < _chunkSize; j++) {
+        chunk[j] = samples[i + j] * window[j];
+      }
+      
       // Compute FFT
       final spectrum = fft.realFft(chunk);
-      final magnitudes = List<double>.filled(_chunkSize ~/ 2, 0.0);
       
-      // Convert to magnitudes
-      double maxMagnitude = 0.0;
+      // Calculate magnitude spectrum with frequency weighting
+      final magnitudes = List<double>.filled(_chunkSize ~/ 2, 0.0);
+      var maxMagnitude = 0.0;
+      
       for (var j = 1; j < _chunkSize ~/ 2; j++) {
-        final real = spectrum[j * 2].x;
-        final imag = spectrum[j * 2 + 1].x;
-        magnitudes[j] = sqrt(real * real + imag * imag);
+        final re = spectrum[j * 2].x;
+        final im = spectrum[j * 2 + 1].x;
+        final freq = j * _sampleRate / _chunkSize;
+        
+        // Apply A-weighting to emphasize important frequencies
+        final weight = _getFrequencyWeight(freq);
+        magnitudes[j] = sqrt(re * re + im * im) * weight;
         maxMagnitude = max(maxMagnitude, magnitudes[j]);
       }
-
-      // Skip if no significant frequencies
-      if (maxMagnitude < 0.001) continue;
-
+      
       // Normalize magnitudes
-      for (var j = 0; j < magnitudes.length; j++) {
-        magnitudes[j] /= maxMagnitude;
-      }
-
-      // Find peaks
-      final peaks = <Point<int>>[];
-      for (var j = 2; j < magnitudes.length - 2; j++) {
-        if (magnitudes[j] > _peakThreshold &&
-            magnitudes[j] > magnitudes[j - 1] * 1.1 &&
-            magnitudes[j] > magnitudes[j - 2] * 1.1 &&
-            magnitudes[j] > magnitudes[j + 1] * 1.1 &&
-            magnitudes[j] > magnitudes[j + 2] * 1.1) {
-          final timePoint = i ~/ _hopSize;
-          peaks.add(Point(j, timePoint));
-          allPeaks.add(Point(j, timePoint));
+      if (maxMagnitude > 0) {
+        for (var j = 0; j < magnitudes.length; j++) {
+          magnitudes[j] /= maxMagnitude;
         }
       }
-
-      totalPeaks += peaks.length;
-
-      // Print progress every 10 chunks
+      
+      // Find peaks in this chunk
+      final peaks = _findPeaks(magnitudes, i ~/ _hopSize);
+      
+      // Only add strong peaks
+      if (peaks.length >= 3) {
+        allPeaks.addAll(peaks);
+      }
+      
+      // Adaptive hop size based on signal characteristics
+      final hopSize = peaks.isEmpty ? _chunkSize ~/ 2 : _hopSize;
+      i += hopSize;
+      
       if (processedChunks % 10 == 0) {
         print('Processing chunk $processedChunks of ${(samples.length - _chunkSize) ~/ _hopSize} (${peaks.length} peaks)');
       }
     }
 
-    print('Total peaks found: $totalPeaks');
+    print('Total peaks found: ${allPeaks.length}');
 
-    // Generate fingerprints from all peaks
-    if (allPeaks.length >= _minPeaks) {
-      // Sort peaks by time for efficient pairing
-      allPeaks.sort((a, b) => a.y.compareTo(b.y));
+    // Generate fingerprints from peak pairs
+    for (var i = 0; i < allPeaks.length; i++) {
+      final anchor = allPeaks[i];
       
-      // Use each peak as an anchor and pair with subsequent peaks
-      for (var i = 0; i < allPeaks.length; i++) {
-        final anchor = allPeaks[i];
-        final anchorTime = anchor.y;
+      // Pair with nearby peaks
+      for (var j = i + 1; j < min(i + _targetZoneSize + 1, allPeaks.length); j++) {
+        final point = allPeaks[j];
         
-        // Look ahead for target zone
-        for (var j = i + 1; j < min(i + _targetZoneSize + 1, allPeaks.length); j++) {
-          final point = allPeaks[j];
-          final timeDelta = point.y - anchorTime;
+        // Calculate time delta between peaks
+        final timeDelta = point.y - anchor.y;
+        
+        // Only create fingerprints for peaks close enough in time
+        if (timeDelta > 0 && timeDelta < 200) {
+          final hash = _generateHash(anchor, point);
           
-          // Only create hash if points are close enough in time
-          if (timeDelta > 0 && timeDelta < 200) {
-            final hash = ((anchor.x & 0x7FF) << 20) | 
-                       ((point.x & 0x7FF) << 9) | 
-                       (timeDelta & 0x1FF);
-            
-            fingerprints.add({
-              'hash': hash,
-              'offset': anchorTime
-            });
-          }
+          fingerprints.add({
+            'hash': hash,
+            'offset': anchor.y
+          });
         }
       }
     }
 
     print('Generated ${fingerprints.length} fingerprints');
     return fingerprints;
+  }
+
+  List<Point<int>> _findPeaks(List<double> magnitudes, int timeIndex) {
+    final peaks = <Point<int>>[];
+    final numBins = magnitudes.length ~/ 2;
+    
+    // Find the average magnitude for noise floor
+    var avgMagnitude = 0.0;
+    for (var i = _minFreqBin; i < numBins; i++) {
+      avgMagnitude += magnitudes[i];
+    }
+    avgMagnitude /= (numBins - _minFreqBin);
+    
+    // Only process if signal is strong enough
+    if (avgMagnitude < _noiseFloor) return peaks;
+    
+    // Find peaks in each critical band
+    for (var bandIndex = 0; bandIndex < _bandEdges.length - 1; bandIndex++) {
+      final lowFreq = _bandEdges[bandIndex];
+      final highFreq = _bandEdges[bandIndex + 1];
+      
+      // Convert frequencies to FFT bins
+      final lowBin = max<int>(_minFreqBin, (lowFreq * _chunkSize / _sampleRate).round());
+      final highBin = min<int>(numBins - 1, (highFreq * _chunkSize / _sampleRate).round());
+      
+      // Find local maxima in this band
+      for (var bin = lowBin + 2; bin < highBin - 2; bin++) {
+        final magnitude = magnitudes[bin];
+        
+        // Must be above noise floor and threshold
+        if (magnitude < avgMagnitude * 2 || magnitude < _peakThreshold) continue;
+        
+        // Must be local maximum
+        if (magnitude <= magnitudes[bin - 2] || 
+            magnitude <= magnitudes[bin - 1] ||
+            magnitude <= magnitudes[bin + 1] ||
+            magnitude <= magnitudes[bin + 2]) continue;
+        
+        // Check minimum spacing from other peaks
+        var isFarEnough = true;
+        for (final peak in peaks) {
+          if ((bin - peak.x).abs() < _minPeakSpacing) {
+            isFarEnough = false;
+            break;
+          }
+        }
+        
+        if (isFarEnough) {
+          peaks.add(Point(bin, timeIndex));
+        }
+      }
+    }
+    
+    return peaks;
+  }
+
+  int _generateHash(Point<int> anchor, Point<int> point) {
+    final anchorFreq = anchor.x;
+    final pointFreq = point.x;
+    final timeDelta = point.y - anchor.y;
+    
+    // Convert frequencies to bark scale (better matches human perception)
+    final anchorBark = _freqToBark(anchorFreq * _sampleRate / _chunkSize);
+    final pointBark = _freqToBark(pointFreq * _sampleRate / _chunkSize);
+    
+    // Calculate frequency ratio in bark scale
+    final barkDiff = (pointBark - anchorBark).round();
+    
+    // Create hash combining:
+    // - 12 bits: Anchor frequency (bark scale)
+    // - 8 bits: Frequency difference (bark scale)
+    // - 12 bits: Time delta (quantized)
+    final hash = ((anchorBark.round() & 0xFFF) << 20) |
+                ((barkDiff + 24 & 0xFF) << 12) |
+                (timeDelta & 0xFFF);
+    
+    return hash;
+  }
+
+  double _freqToBark(double freq) {
+    return 13 * atan(0.00076 * freq) + 3.5 * atan(pow(freq / 7500, 2));
+  }
+
+  double _getFrequencyWeight(double freq) {
+    // Simplified A-weighting curve
+    final f2 = freq * freq;
+    final f4 = f2 * f2;
+    return (12200 * 12200 * f4) / ((f2 + 20.6 * 20.6) * 
+           sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) * 
+           (f2 + 12200 * 12200));
   }
 }

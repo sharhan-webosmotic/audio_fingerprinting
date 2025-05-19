@@ -36,6 +36,7 @@ dependencies:
   provider: ^6.1.1
   path_provider: ^2.1.2
   shared_preferences: ^2.2.2
+  http: ^1.1.0
 
   # Audio processing
   record: ^5.0.4
@@ -48,6 +49,7 @@ dependencies:
   flutter_svg: ^2.0.9
   loading_animation_widget: ^1.2.0+4
   image_picker: ^1.0.7
+  file_picker: ^10.1.2
 
 dev_dependencies:
   flutter_test:
