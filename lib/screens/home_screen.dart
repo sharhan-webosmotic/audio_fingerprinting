@@ -8,8 +8,7 @@ import 'package:record/record.dart';
 import '../models/song.dart';
 import 'package:file_picker/file_picker.dart';
 import '../system_audio_recorder.dart';
-
-
+import 'package:just_audio/just_audio.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -19,14 +18,40 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  AudioPlayer? player;
   late StorageService _storageService;
   bool _isProcessing = false;
   List<Song> _storedSongs = [];
   String _processingStatus = '';
+  String? _lastOriginalAudioUrl;
+  String? _lastProcessedAudioUrl;
+  String? _lastRecordedPath; // Store the path of recorded audio
   final record = AudioRecorder();
   final systemRecorder = SystemAudioRecorder();
   bool _isRecording = false;
   bool _isSystemAudio = false;
+
+  Future<void> _playRecordedAudio() async {
+    if (_lastRecordedPath == null) {
+      print('No recorded audio available');
+      return;
+    }
+
+    try {
+      print('Playing recorded audio from: $_lastRecordedPath');
+      // Stop any existing playback
+      await player?.stop();
+      
+      // Create new player instance
+      final audioPlayer = AudioPlayer();
+      player = audioPlayer;
+      
+      await audioPlayer.setFilePath(_lastRecordedPath!);
+      await audioPlayer.play();
+    } catch (e) {
+      print('Error playing audio: $e');
+    }
+  }
 
   Future<void> _uploadAndMatchFile() async {
     try {
@@ -34,32 +59,30 @@ class _HomeScreenState extends State<HomeScreen> {
         type: FileType.custom,
         allowedExtensions: ['wav', 'mp3', 'm4a', 'ogg'],
       );
-      
+
       if (result != null && result.files.single.path != null) {
         setState(() {
           _isProcessing = true;
           _processingStatus = 'Uploading and matching...';
         });
-        
+
         final filePath = result.files.single.path!;
         final matchResult = await _storageService.matchAudio(filePath);
         print(matchResult);
         setState(() {
-          _processingStatus = matchResult['matched'] 
-            ? 'Match found! ${matchResult['songName']} (${matchResult['confidence']}% confidence)'
-            : 'No match found';
+          _processingStatus = matchResult['matched']
+              ? 'Match found! ${matchResult['songName']} (${matchResult['confidence']}% confidence)'
+              : 'No match found';
         });
-        
+
         // Show alert with match result
         showDialog(
           context: context,
           builder: (context) => AlertDialog(
             title: Text(matchResult['matched'] ? 'Match Found!' : 'No Match'),
-            content: Text(
-              matchResult['matched']
+            content: Text(matchResult['matched']
                 ? 'Song: ${matchResult['songName']}\nConfidence: ${matchResult['confidence']}%'
-                : 'No matching song found in the database.'
-            ),
+                : 'No matching song found in the database.'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
@@ -121,9 +144,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final matchResult = await _storageService.matchAudio(path);
       print(matchResult);
       setState(() {
-        _processingStatus = matchResult['matched'] 
-          ? 'Match found! ${matchResult['songName']} (${matchResult['confidence']}% confidence)'
-          : 'No match found';
+        _processingStatus = matchResult['matched']
+            ? 'Match found! ${matchResult['songName']} (${matchResult['confidence']}% confidence)'
+            : 'No match found';
       });
 
       // Show alert with match result
@@ -131,11 +154,9 @@ class _HomeScreenState extends State<HomeScreen> {
         context: context,
         builder: (context) => AlertDialog(
           title: Text(matchResult['matched'] ? 'Match Found!' : 'No Match'),
-          content: Text(
-            matchResult['matched']
+          content: Text(matchResult['matched']
               ? 'Song: ${matchResult['songName']}\nConfidence: ${matchResult['confidence']}%'
-              : 'No matching song found in the database.'
-          ),
+              : 'No matching song found in the database.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -182,7 +203,7 @@ class _HomeScreenState extends State<HomeScreen> {
         await _startSystemAudioRecording();
         return;
       }
-      
+
       print('Checking microphone permission...');
       if (await record.hasPermission()) {
         print('Permission granted');
@@ -194,7 +215,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final tempDir = await getTemporaryDirectory();
         final path = '${tempDir.path}/recorded_audio.wav';
         print('Will save recording to: $path');
-        
+
         setState(() {
           _isRecording = true;
           _processingStatus = 'Recording... Please play music';
@@ -202,31 +223,41 @@ class _HomeScreenState extends State<HomeScreen> {
 
         print('Configuring recorder...');
         // Use high-quality WAV format for better fingerprinting
-        final config = RecordConfig(
-          encoder: AudioEncoder.wav,  // WAV format for acoustid compatibility
-          bitRate: 256000,  // Standard bitrate
-          sampleRate: 44100,  // 44.1kHz - standard for audio fingerprinting
-          numChannels: 1,  // Mono - better for fingerprinting algorithms
+        const config = RecordConfig(
+          encoder: AudioEncoder.wav,
+          bitRate: 256000,
+          sampleRate: 22050, // Match server's sample rate
+          numChannels: 1, // Mono for fingerprinting
         );
-        
+
         print('Starting recording...');
         await record.start(config, path: path);
         print('Recording started');
 
         print('Waiting for 8 seconds...');
         // Record for 12 seconds to get better fingerprint
-        await Future.delayed(const Duration(seconds: 12));
+        await Future.delayed(const Duration(seconds: 15));
         print('Stopping recording...');
         final recordedPath = await record.stop();
         print('Recording stopped');
-        
         print('Recorded file path: $recordedPath');
+
+        // Save the recorded path to play later
+        setState(() {
+          _lastRecordedPath = recordedPath;
+        });
+
+        // Set the audio URLs
+        // setState(() {
+        //   _lastOriginalAudioUrl = 'http://10.0.1.46:3000/original-audio';
+        //   _lastProcessedAudioUrl = 'http://10.0.1.46:3000/processed-audio';
+        // });
         if (recordedPath != null) {
           final file = File(recordedPath);
           final exists = await file.exists();
           final size = exists ? await file.length() : 0;
           print('File exists: $exists, size: $size bytes');
-          
+
           if (!exists || size == 0) {
             print('Error: Recording file is empty or does not exist');
             setState(() {
@@ -239,15 +270,16 @@ class _HomeScreenState extends State<HomeScreen> {
           });
 
           print('Sending file for matching...');
-          final matchResult = await _storageService.matchAudio(recordedPath);
+          final matchResult =
+              await _storageService.matchAudio(recordedPath, isLive: true);
           print('Match result: $matchResult');
-          
+
           setState(() {
-            _processingStatus = matchResult['matched'] 
-              ? 'Match found! ${matchResult['song']} (${matchResult['confidence']}% confidence)'
-              : matchResult['error'] != null 
-                ? 'Error: ${matchResult['error']}'
-                : 'No match found';
+            _processingStatus = matchResult['matched']
+                ? 'Match found! ${matchResult['song']} (${matchResult['confidence']}% confidence)'
+                : matchResult['error'] != null
+                    ? 'Error: ${matchResult['error']}'
+                    : 'No match found';
           });
 
           // Show alert dialog with match result
@@ -255,11 +287,9 @@ class _HomeScreenState extends State<HomeScreen> {
             context: context,
             builder: (context) => AlertDialog(
               title: Text(matchResult['matched'] ? 'Match Found!' : 'No Match'),
-              content: Text(
-                matchResult['matched']
+              content: Text(matchResult['matched']
                   ? 'Song: ${matchResult['songName']}\nConfidence: ${matchResult['confidence']}%'
-                  : 'No matching song found in the database.'
-              ),
+                  : 'No matching song found in the database.'),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
@@ -318,8 +348,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   controller: controller,
                   autofocus: true,
                   decoration: const InputDecoration(
-                    hintText: 'Enter the name of the song'
-                  ),
+                      hintText: 'Enter the name of the song'),
                 ),
                 actions: [
                   TextButton(
@@ -400,10 +429,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child: _storedSongs.isEmpty
+          // Main content
+          _storedSongs.isEmpty
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -467,7 +496,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton(
-                              icon: Icon(Icons.play_arrow, color: Colors.white70),
+                              icon:
+                                  Icon(Icons.play_arrow, color: Colors.white70),
                               onPressed: () => {},
                             ),
                             IconButton(
@@ -480,21 +510,26 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   },
                 ),
-          ),
+          // Loading overlay
           if (_isProcessing)
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF6C63FF)),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _processingStatus,
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                ],
+            Container(
+              color: Colors.black.withOpacity(0.5),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(Color(0xFF6C63FF)),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      _processingStatus,
+                      style: TextStyle(color: Colors.white70),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
               ),
             ),
         ],
@@ -514,6 +549,53 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: const Icon(Icons.add, color: Colors.white),
                 heroTag: 'add',
               ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Audio playback buttons (if available)
+          if (_lastOriginalAudioUrl != null && _lastProcessedAudioUrl != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  FloatingActionButton(
+                    onPressed: _isProcessing
+                        ? null
+                        : () => _playAudio(_lastOriginalAudioUrl!),
+                    backgroundColor: const Color(0xFF6C63FF),
+                    mini: true,
+                    child: const Icon(Icons.music_note, color: Colors.white),
+                    heroTag: 'play_original',
+                  ),
+                  const SizedBox(width: 8),
+                  FloatingActionButton(
+                    onPressed: _isProcessing
+                        ? null
+                        : () => _playAudio(_lastProcessedAudioUrl!),
+                    backgroundColor: const Color(0xFF6C63FF),
+                    mini: true,
+                    child: const Icon(Icons.volume_up, color: Colors.white),
+                    heroTag: 'play_processed',
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 16),
+          // Play recorded audio button
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                FloatingActionButton(
+                  onPressed:
+                      _lastRecordedPath == null ? null : _playRecordedAudio,
+                  backgroundColor: const Color(0xFF6C63FF),
+                  child: const Icon(Icons.play_arrow, color: Colors.white),
+                  tooltip: 'Play Recorded Audio',
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 16),
@@ -551,17 +633,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
                 child: _isProcessing
-                  ? Center(
-                      child: LoadingAnimationWidget.waveDots(
+                    ? Center(
+                        child: LoadingAnimationWidget.waveDots(
+                          color: Colors.white,
+                          size: 50,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.mic,
                         color: Colors.white,
-                        size: 50,
+                        size: 48,
                       ),
-                    )
-                  : const Icon(
-                      Icons.mic,
-                      color: Colors.white,
-                      size: 48,
-                    ),
               ),
             ),
           ),
@@ -570,6 +652,58 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
+  }
+
+  Future<void> _playAudio(String url) async {
+    AudioPlayer? player;
+    try {
+      print('Playing audio from URL: $url');
+      player = AudioPlayer();
+
+      // Set a listener for player state changes
+      player.playerStateStream.listen((state) {
+        print(
+            'Player state changed: ${state.processingState} - playing: ${state.playing}');
+      });
+
+      // Set a listener for errors
+      player.playbackEventStream.listen(
+        (event) => print('Playback event: $event'),
+        onError: (Object e, StackTrace st) {
+          print('A stream error occurred: $e');
+        },
+      );
+
+      // Set a listener for position updates
+      player.positionStream.listen(
+        (position) => print('Current position: ${position.inSeconds}s'),
+        onError: (Object e, StackTrace st) {
+          print('Position stream error: $e');
+        },
+      );
+
+      print('Setting URL...');
+      await player.setUrl(url);
+      print('URL set, starting playback...');
+      await player.play();
+      print('Playback started');
+
+      // Wait for playback to complete
+      await player.processingStateStream.firstWhere(
+        (state) => state == ProcessingState.completed,
+      );
+      print('Playback completed');
+    } catch (e, st) {
+      print('Error playing audio: $e');
+      print('Stack trace: $st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error playing audio: $e')),
+        );
+      }
+    } finally {
+      await player?.dispose();
+    }
   }
 
   @override

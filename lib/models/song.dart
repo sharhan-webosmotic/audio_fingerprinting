@@ -11,7 +11,7 @@ class Song {
 
   factory Song.fromJson(Map<String, dynamic> json) {
     return Song(
-      id: json['id'] as String,
+      id: (json['_id'] ?? json['id']) as String,
       name: json['name'] as String,
       duration: json['duration'] as int,
     );

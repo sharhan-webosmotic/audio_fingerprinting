@@ -17,9 +17,12 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
   String? _matchResult;
   int _remainingSeconds = 10;
   Timer? _timer;
+  double _currentAmplitude = 0.0;
+  bool _isAudioLevelGood = false;
+  Timer? _amplitudeTimer;
   final SystemAudioRecorder _systemRecorder = SystemAudioRecorder();
-  final _micRecorder = Record();
-  
+  final record = AudioRecorder();
+
   @override
   void initState() {
     super.initState();
@@ -53,21 +56,32 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
         await _systemRecorder.startRecording();
       } else {
         // Start microphone recording
-        if (await _micRecorder.hasPermission()) {
-          await _micRecorder.start(
-            encoder: AudioEncoder.wav,
-            samplingRate: 44100,
-            numChannels: 2,
-          );
+        if (await record.hasPermission()) {
+          // await record.start(
+          //   encoder: AudioEncoder.wav,
+          //   samplingRate: 22050, // Match fingerprinting sample rate
+          //   numChannels: 1, // Mono recording
+          //   bitRate: 256000, // Higher bitrate for better quality
+          // );
+
+          // Start amplitude monitoring
+          _amplitudeTimer =
+              Timer.periodic(Duration(milliseconds: 200), (_) async {
+            final amplitude = await _micRecorder.getAmplitude();
+            setState(() {
+              _currentAmplitude = amplitude.current;
+              _isAudioLevelGood = amplitude.current > 0.1;
+            });
+          });
         }
       }
-      
+
       setState(() {
         _isRecording = true;
         _matchResult = null;
-        _remainingSeconds = 10;
+        _remainingSeconds = 10; // Reset to 10 seconds
       });
-      
+
       // Start countdown timer
       _timer = Timer.periodic(Duration(seconds: 1), (timer) {
         setState(() {
@@ -98,11 +112,14 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
           await _sendRecordingToServer(File(path));
         }
       }
-      
+
       _timer?.cancel();
+      _amplitudeTimer?.cancel();
       setState(() {
         _isRecording = false;
         _remainingSeconds = 10;
+        _currentAmplitude = 0.0;
+        _isAudioLevelGood = false;
       });
     } catch (e) {
       print('Failed to stop recording: $e');
@@ -120,7 +137,12 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
           'file',
           recordingFile.path,
           contentType: MediaType('audio', 'wav'),
-        ));
+        ))
+        ..headers.addAll({
+          'x-recording-type': 'live',
+          'x-sample-rate': '22050',
+          'x-channels': '1'
+        });
 
       var response = await request.send();
       var responseBody = await response.stream.bytesToString();
@@ -139,8 +161,49 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
   @override
   void dispose() {
     _timer?.cancel();
+    _amplitudeTimer?.cancel();
     _micRecorder.dispose();
     super.dispose();
+  }
+
+  Widget _buildVolumeIndicator() {
+    return Container(
+      height: 60,
+      padding: EdgeInsets.all(8),
+      child: Column(children: [
+        LinearProgressIndicator(
+          value: _currentAmplitude,
+          backgroundColor: Colors.grey[300],
+          valueColor: AlwaysStoppedAnimation<Color>(
+            _isAudioLevelGood ? Colors.green : Colors.orange,
+          ),
+        ),
+        SizedBox(height: 4),
+        Text(
+          _isAudioLevelGood ? 'Good Audio Level' : 'Speak Louder',
+          style: TextStyle(
+              color: _isAudioLevelGood ? Colors.green : Colors.orange),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildQualityGuide() {
+    return Padding(
+      padding: EdgeInsets.all(8),
+      child: Card(
+        child: Padding(
+          padding: EdgeInsets.all(8),
+          child: Column(children: [
+            Text('Tips for Better Recording:',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            Text('• Hold phone close to audio source'),
+            Text('• Avoid noisy environments'),
+            Text('• Keep phone steady while recording'),
+          ]),
+        ),
+      ),
+    );
   }
 
   @override
@@ -148,23 +211,27 @@ class _AudioRecorderWidgetState extends State<AudioRecorderWidget> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        if (!_isSystemAudio) _buildVolumeIndicator(),
+        if (!_isSystemAudio && !_isRecording) _buildQualityGuide(),
         SwitchListTile(
           title: Text('Record System Audio'),
-          subtitle: Text(_isSystemAudio 
-            ? 'Recording audio playing on device' 
-            : 'Recording from microphone'),
+          subtitle: Text(_isSystemAudio
+              ? 'Recording audio playing on device'
+              : 'Recording from microphone'),
           value: _isSystemAudio,
-          onChanged: (bool value) {
-            setState(() {
-              _isSystemAudio = value;
-            });
-          },
+          onChanged: _isRecording
+              ? null
+              : (bool value) {
+                  setState(() {
+                    _isSystemAudio = value;
+                  });
+                },
         ),
         ElevatedButton(
           onPressed: _toggleRecording,
-          child: Text(_isRecording 
-            ? 'Recording... $_remainingSeconds s' 
-            : 'Start Recording'),
+          child: Text(_isRecording
+              ? 'Recording... $_remainingSeconds s'
+              : 'Start Recording'),
           style: ElevatedButton.styleFrom(
             backgroundColor: _isRecording ? Colors.red : Colors.blue,
             padding: EdgeInsets.symmetric(horizontal: 32, vertical: 16),

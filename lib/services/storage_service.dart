@@ -32,9 +32,9 @@ class StorageService {
     }
   }
 
-  Future<Map<String, dynamic>> matchAudio(String filePath) async {
+  Future<Map<String, dynamic>> matchAudio(String filePath, {bool isLive = false}) async {
     try {
-      final response = await _apiService.matchAudio(filePath);
+      final response = await _apiService.matchAudio(filePath, isLive: isLive);
       return response;
     } catch (e) {
       print('Error matching audio: $e');

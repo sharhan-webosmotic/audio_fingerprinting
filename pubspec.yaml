@@ -40,7 +40,7 @@ dependencies:
 
   # Audio processing
   record: ^5.0.4
-  just_audio: ^0.9.36
+  just_audio: ^0.10.3
   fftea: ^1.5.0
 
   # UI components
