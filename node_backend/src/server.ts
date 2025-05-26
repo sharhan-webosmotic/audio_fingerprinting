@@ -22,8 +22,27 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For parsing form data
 
+import path from "path";
+import fs from "fs";
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, "../uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 // File upload configuration
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const ext = path.extname(file.originalname);
+    cb(null, `recording_${timestamp}${ext}`);
+  },
+});
+
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
@@ -108,7 +127,7 @@ app.post("/add", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No audio file provided" });
     }
 
-    const { tcodes, hcodes } = await generateFingerprints(req.file.buffer);
+    const { tcodes, hcodes } = await generateFingerprints(fs.readFileSync(req.file.path));
 
     // Create song record
     const song = new Song({
@@ -136,6 +155,150 @@ app.post("/add", upload.single("file"), async (req, res) => {
   }
 });
 
+// app.post("/match", upload.single("file"), async (req, res) => {
+//   try {
+//     console.log("Received file:", req.file);
+//     if (!req.file) {
+//       return res.status(400).json({ error: "No audio file provided" });
+//     }
+//     console.log(req.body);
+//     const isLiveRecording = req.body?.isLive === "true";
+//     console.log("Recording type:", isLiveRecording ? "live" : "file");
+
+//     console.log("Starting fingerprint generation for matching...");
+//     const { tcodes, hcodes } = await generateFingerprints(req.file.buffer, {
+//       preprocess: isLiveRecording,
+//       adaptiveThreshold: isLiveRecording,
+//     });
+//     console.log("Fingerprints generated, searching for matches...");
+
+//     console.log(`Processing ${hcodes.length} fingerprints...`);
+//     const matches = new Map<string, { offsets: number[]; count: number }>();
+
+//     // Process each hash individually like the original implementation
+//     for (let i = 0; i < hcodes.length; i++) {
+//       const hash = hcodes[i];
+//       const fingerprints = await Fingerprint.find({ hash });
+
+//       for (const fp of fingerprints) {
+//         const songId = fp.songId.toString();
+//         const timeDiff = tcodes[i] - fp.offset;
+
+//         if (!matches.has(songId)) {
+//           matches.set(songId, { offsets: [], count: 0 });
+//         }
+
+//         const songMatch = matches.get(songId)!;
+//         songMatch.offsets.push(timeDiff);
+//         songMatch.count++;
+//       }
+//     }
+
+//     console.log(`Found ${matches.size} matching fingerprints`);
+
+//     // Find best match using time offset clusters
+//     let bestMatch = null;
+//     let bestScore = 0;
+//     let bestClusterDensity = 0;
+
+//     for (const [songId, match] of matches) {
+//       // Calculate match score with adaptive time window for live recordings
+//       const offsetCounts = new Map<number, number>();
+//       const timeWindow = isLiveRecording ? 0.2 : 0.1; // Wider window for live recordings
+
+//       match.offsets.forEach((offset) => {
+//         const rounded = Math.round(offset / timeWindow) * timeWindow;
+//         offsetCounts.set(rounded, (offsetCounts.get(rounded) || 0) + 1);
+//       });
+
+//       const largestCluster = Math.max(...offsetCounts.values());
+//       // Calculate density based on input fingerprints, not total matches
+//       const clusterDensity = largestCluster / hcodes.length;
+
+//       // Score calculation with adaptive thresholds
+//       const MIN_ALIGNED = isLiveRecording ? 5 : 10; // Even more forgiving for live
+//       const MIN_DENSITY = isLiveRecording ? 0.01 : 0.2; // Much more forgiving density for live
+
+//       // For live recordings, use a weighted score that considers both alignment and match count
+//       console.log({ isLiveRecording });
+//       const score = isLiveRecording
+//         ? largestCluster * 2 + match.count / hcodes.length // Boost alignment and consider total matches
+//         : largestCluster >= MIN_ALIGNED && clusterDensity >= MIN_DENSITY
+//         ? largestCluster
+//         : 0;
+
+//       console.log({
+//         score,
+//         largestCluster,
+//         inputFingerprints: hcodes.length,
+//         density: clusterDensity,
+//       });
+//       console.log(
+//         `Song ${songId}: matches=${
+//           match.count
+//         }, aligned=${largestCluster}, density=${clusterDensity.toFixed(2)}`
+//       );
+
+//       if (score > bestScore) {
+//         bestScore = score;
+//         bestMatch = songId;
+//         bestClusterDensity = clusterDensity;
+//       }
+//     }
+
+//     // Calculate confidence with adaptive thresholds
+//     const minConfidenceThreshold = isLiveRecording ? 15 : 25; // Lower threshold for live
+//     const minDensityThreshold = isLiveRecording ? 0.01 : 0.1; // Lower density requirement for live
+
+//     // For live recordings, calculate confidence differently
+//     const confidence = isLiveRecording
+//       ? Math.min(100, (bestScore / 5) * 100) // More forgiving confidence calculation
+//       : Math.min(100, (bestScore / Math.min(20, hcodes.length)) * 100);
+
+//     console.log({
+//       confidence,
+//       bestScore,
+//       hcodesLength: hcodes.length,
+//       isLiveRecording,
+//     });
+
+//     // Adaptive matching criteria
+//     if (
+//       bestMatch &&
+//       confidence >= minConfidenceThreshold &&
+//       bestClusterDensity >= minDensityThreshold
+//     ) {
+//       // Only return matches with decent confidence
+//       const song = await Song.findById(bestMatch);
+//       console.log(
+//         `Match found: ${song?.name} with confidence ${confidence.toFixed(2)}%`
+//       );
+//       res.json({
+//         matched: true,
+//         song,
+//         confidence: Math.min(100, confidence),
+//         stats: {
+//           score: bestScore,
+//           totalFingerprints: hcodes.length,
+//           clusterDensity: bestClusterDensity,
+//         },
+//       });
+//     } else {
+//       console.log("No confident match found");
+//       res.json({
+//         matched: false,
+//         stats: {
+//           totalFingerprints: hcodes.length,
+//           bestScore: bestScore,
+//           bestClusterDensity: bestClusterDensity,
+//         },
+//       });
+//     }
+//   } catch (err) {
+//     console.error("Error matching audio:", err);
+//     res.status(500).json({ error: "Error matching audio file" });
+//   }
+// });
 app.post("/match", upload.single("file"), async (req, res) => {
   try {
     console.log("Received file:", req.file);
@@ -147,16 +310,15 @@ app.post("/match", upload.single("file"), async (req, res) => {
     console.log("Recording type:", isLiveRecording ? "live" : "file");
 
     console.log("Starting fingerprint generation for matching...");
-    const { tcodes, hcodes } = await generateFingerprints(req.file.buffer, {
+    const { tcodes, hcodes } = await generateFingerprints(fs.readFileSync(req.file.path), {
       preprocess: isLiveRecording,
       adaptiveThreshold: isLiveRecording,
     });
     console.log("Fingerprints generated, searching for matches...");
 
     console.log(`Processing ${hcodes.length} fingerprints...`);
-    const matches = new Map<string, { offsets: number[]; count: number }>();
+    const matches = new Map();
 
-    // Process each hash individually like the original implementation
     for (let i = 0; i < hcodes.length; i++) {
       const hash = hcodes[i];
       const fingerprints = await Fingerprint.find({ hash });
@@ -169,7 +331,7 @@ app.post("/match", upload.single("file"), async (req, res) => {
           matches.set(songId, { offsets: [], count: 0 });
         }
 
-        const songMatch = matches.get(songId)!;
+        const songMatch = matches.get(songId);
         songMatch.offsets.push(timeDiff);
         songMatch.count++;
       }
@@ -182,58 +344,75 @@ app.post("/match", upload.single("file"), async (req, res) => {
     let bestScore = 0;
     let bestClusterDensity = 0;
 
-    for (const [songId, match] of matches) {
-      // Calculate match score with adaptive time window for live recordings
-      const offsetCounts = new Map<number, number>();
-      const timeWindow = isLiveRecording ? 0.2 : 0.1; // Wider window for live recordings
+    // Calculate scores for all songs
+    const scores = Array.from(matches.entries())
+      .map(([songId, match]) => {
+        const offsetCounts = new Map();
+        const timeWindow = isLiveRecording ? 0.15 : 0.1;
 
-      match.offsets.forEach((offset) => {
-        const rounded = Math.round(offset / timeWindow) * timeWindow;
-        offsetCounts.set(rounded, (offsetCounts.get(rounded) || 0) + 1);
+        match.offsets.forEach((offset: any) => {
+          const rounded = Math.round(offset / timeWindow) * timeWindow;
+          offsetCounts.set(rounded, (offsetCounts.get(rounded) || 0) + 1);
+        });
+
+        const largestCluster = Math.max(...offsetCounts.values(), 0);
+        const clusterDensity =
+          hcodes.length > 0 ? largestCluster / hcodes.length : 0;
+
+        // Score calculation with adaptive thresholds
+        const MIN_ALIGNED = isLiveRecording ? 8 : 10; // Stricter alignment for live
+        const MIN_DENSITY = isLiveRecording ? 0.05 : 0.2; // Stricter density for live
+
+        const score = isLiveRecording
+          ? largestCluster * 2 + match.count / hcodes.length // Boost alignment
+          : largestCluster >= MIN_ALIGNED && clusterDensity >= MIN_DENSITY
+          ? largestCluster
+          : 0;
+
+        console.log({
+          songId,
+          score,
+          largestCluster,
+          inputFingerprints: hcodes.length,
+          density: clusterDensity,
+        });
+        console.log(
+          `Song ${songId}: matches=${
+            match.count
+          }, aligned=${largestCluster}, density=${clusterDensity.toFixed(2)}`
+        );
+
+        return { songId, score, density: clusterDensity };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    // Cross-song comparison to reject ambiguous matches
+    if (scores.length > 1 && scores[0].score - scores[1].score < 10) {
+      console.log("Ambiguous match detected, rejecting");
+      res.json({
+        matched: false,
+        stats: {
+          totalFingerprints: hcodes.length,
+          bestScore: scores[0].score,
+          bestClusterDensity: scores[0].density,
+        },
       });
+      return;
+    }
 
-      const largestCluster = Math.max(...offsetCounts.values());
-      // Calculate density based on input fingerprints, not total matches
-      const clusterDensity = largestCluster / hcodes.length;
-
-      // Score calculation with adaptive thresholds
-      const MIN_ALIGNED = isLiveRecording ? 5 : 10; // Even more forgiving for live
-      const MIN_DENSITY = isLiveRecording ? 0.01 : 0.2; // Much more forgiving density for live
-
-      // For live recordings, use a weighted score that considers both alignment and match count
-      console.log({ isLiveRecording });
-      const score = isLiveRecording
-        ? largestCluster * 2 + match.count / hcodes.length // Boost alignment and consider total matches
-        : largestCluster >= MIN_ALIGNED && clusterDensity >= MIN_DENSITY
-        ? largestCluster
-        : 0;
-
-      console.log({
-        score,
-        largestCluster,
-        inputFingerprints: hcodes.length,
-        density: clusterDensity,
-      });
-      console.log(
-        `Song ${songId}: matches=${
-          match.count
-        }, aligned=${largestCluster}, density=${clusterDensity.toFixed(2)}`
-      );
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = songId;
-        bestClusterDensity = clusterDensity;
-      }
+    // Set best match if there’s a valid candidate
+    if (scores.length > 0 && scores[0].score > 0) {
+      bestMatch = scores[0].songId;
+      bestScore = scores[0].score;
+      bestClusterDensity = scores[0].density;
     }
 
     // Calculate confidence with adaptive thresholds
-    const minConfidenceThreshold = isLiveRecording ? 15 : 25; // Lower threshold for live
-    const minDensityThreshold = isLiveRecording ? 0.01 : 0.1; // Lower density requirement for live
+    const minConfidenceThreshold = isLiveRecording ? 20 : 25; // Stricter for live
+    const minDensityThreshold = isLiveRecording ? 0.05 : 0.1; // Stricter density
 
-    // For live recordings, calculate confidence differently
     const confidence = isLiveRecording
-      ? Math.min(100, (bestScore / 5) * 100) // More forgiving confidence calculation
+      ? Math.min(90, (bestScore / 5) * 100 * (bestClusterDensity / 0.1)) // Scale by density
       : Math.min(100, (bestScore / Math.min(20, hcodes.length)) * 100);
 
     console.log({
@@ -249,7 +428,6 @@ app.post("/match", upload.single("file"), async (req, res) => {
       confidence >= minConfidenceThreshold &&
       bestClusterDensity >= minDensityThreshold
     ) {
-      // Only return matches with decent confidence
       const song = await Song.findById(bestMatch);
       console.log(
         `Match found: ${song?.name} with confidence ${confidence.toFixed(2)}%`
@@ -280,7 +458,6 @@ app.post("/match", upload.single("file"), async (req, res) => {
     res.status(500).json({ error: "Error matching audio file" });
   }
 });
-
 app.get("/songs", async (req, res) => {
   try {
     const songs = await Song.find().sort("-created_at");

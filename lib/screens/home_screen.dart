@@ -31,6 +31,46 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isRecording = false;
   bool _isSystemAudio = false;
 
+  Future<void> _playOriginalAudio() async {
+    if (_lastOriginalAudioUrl == null) {
+      print('No original audio available');
+      return;
+    }
+
+    try {
+      print('Playing original audio from: $_lastOriginalAudioUrl');
+      await player?.stop();
+
+      final audioPlayer = AudioPlayer();
+      player = audioPlayer;
+
+      await audioPlayer.setUrl(_lastOriginalAudioUrl!);
+      await audioPlayer.play();
+    } catch (e) {
+      print('Error playing original audio: $e');
+    }
+  }
+
+  Future<void> _playProcessedAudio() async {
+    if (_lastProcessedAudioUrl == null) {
+      print('No processed audio available');
+      return;
+    }
+
+    try {
+      print('Playing processed audio from: $_lastProcessedAudioUrl');
+      await player?.stop();
+
+      final audioPlayer = AudioPlayer();
+      player = audioPlayer;
+
+      await audioPlayer.setUrl(_lastProcessedAudioUrl!);
+      await audioPlayer.play();
+    } catch (e) {
+      print('Error playing processed audio: $e');
+    }
+  }
+
   Future<void> _playRecordedAudio() async {
     if (_lastRecordedPath == null) {
       print('No recorded audio available');
@@ -41,11 +81,11 @@ class _HomeScreenState extends State<HomeScreen> {
       print('Playing recorded audio from: $_lastRecordedPath');
       // Stop any existing playback
       await player?.stop();
-      
+
       // Create new player instance
       final audioPlayer = AudioPlayer();
       player = audioPlayer;
-      
+
       await audioPlayer.setFilePath(_lastRecordedPath!);
       await audioPlayer.play();
     } catch (e) {
@@ -105,6 +145,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startSystemAudioRecording() async {
+    // Start recording
     setState(() {
       _isProcessing = true;
       _processingStatus = 'Recording system audio...';
@@ -115,6 +156,12 @@ class _HomeScreenState extends State<HomeScreen> {
       // Setup system audio recorder callbacks
       systemRecorder.onRecordingComplete = (String path) {
         print('System audio recording complete: $path');
+        setState(() {
+          _isRecording = false;
+          _isProcessing = false;
+          _lastRecordedPath = path;
+          _processingStatus = 'Recording saved to: $path';
+        });
         _processRecordedAudio(path);
       };
 
@@ -129,8 +176,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
       // Start recording
       await systemRecorder.startRecording();
+
+      // Stop recording after 12 seconds
+      await Future.delayed(const Duration(seconds: 12));
+      if (_isRecording) {
+        setState(() {
+          _processingStatus = 'Stopping recording...';
+        });
+        await systemRecorder.stopRecording();
+      }
     } catch (e) {
-      print('Error starting system audio recording: $e');
+      print('Error with system audio recording: $e');
       setState(() {
         _isProcessing = false;
         _isRecording = false;
@@ -534,123 +590,77 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
         ],
       ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Add song button
-          Padding(
-            padding: const EdgeInsets.only(right: 16.0),
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: FloatingActionButton(
-                onPressed: _isProcessing ? null : _addNewSong,
-                backgroundColor: Color(0xFF6C63FF),
-                mini: true,
-                child: const Icon(Icons.add, color: Colors.white),
-                heroTag: 'add',
-              ),
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Add song button
+            FloatingActionButton(
+              onPressed: _isProcessing ? null : _addNewSong,
+              backgroundColor: const Color(0xFF6C63FF),
+              mini: true,
+              child: const Icon(Icons.add, color: Colors.white),
+              heroTag: 'add',
             ),
-          ),
-          const SizedBox(height: 16),
-          // Audio playback buttons (if available)
-          if (_lastOriginalAudioUrl != null && _lastProcessedAudioUrl != null)
-            Padding(
-              padding: const EdgeInsets.only(right: 16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+            const SizedBox(height: 16),
+            // Audio playback buttons (if available)
+            if (_lastOriginalAudioUrl != null && _lastProcessedAudioUrl != null)
+              Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   FloatingActionButton(
-                    onPressed: _isProcessing
-                        ? null
-                        : () => _playAudio(_lastOriginalAudioUrl!),
+                    onPressed: _playOriginalAudio,
                     backgroundColor: const Color(0xFF6C63FF),
                     mini: true,
                     child: const Icon(Icons.music_note, color: Colors.white),
-                    heroTag: 'play_original',
+                    heroTag: 'original',
                   ),
                   const SizedBox(width: 8),
                   FloatingActionButton(
-                    onPressed: _isProcessing
-                        ? null
-                        : () => _playAudio(_lastProcessedAudioUrl!),
+                    onPressed: _playProcessedAudio,
                     backgroundColor: const Color(0xFF6C63FF),
                     mini: true,
-                    child: const Icon(Icons.volume_up, color: Colors.white),
-                    heroTag: 'play_processed',
+                    child: const Icon(Icons.graphic_eq, color: Colors.white),
+                    heroTag: 'processed',
                   ),
                 ],
               ),
+            const SizedBox(height: 16),
+            // Upload button
+            FloatingActionButton(
+              onPressed: _isProcessing ? null : _uploadAndMatchFile,
+              backgroundColor: Colors.blueGrey,
+              mini: true,
+              child: const Icon(Icons.upload_file, color: Colors.white),
+              heroTag: 'upload',
             ),
-          const SizedBox(height: 16),
-          // Play recorded audio button
-          Padding(
-            padding: const EdgeInsets.only(right: 16.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                FloatingActionButton(
-                  onPressed:
-                      _lastRecordedPath == null ? null : _playRecordedAudio,
-                  backgroundColor: const Color(0xFF6C63FF),
-                  child: const Icon(Icons.play_arrow, color: Colors.white),
-                  tooltip: 'Play Recorded Audio',
-                ),
-              ],
+            const SizedBox(height: 16),
+            // System audio recording button (Shazam-like)
+            FloatingActionButton(
+              onPressed: _isProcessing ? null : _startSystemAudioRecording,
+              backgroundColor: Colors.orange,
+              child: _isRecording
+                  ? const Icon(Icons.stop, color: Colors.white)
+                  : const Icon(Icons.speaker, color: Colors.white),
+              tooltip: 'Record System Audio',
+              heroTag: 'system',
             ),
-          ),
-          const SizedBox(height: 16),
-          // Upload button
-          Padding(
-            padding: const EdgeInsets.only(right: 16.0),
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: FloatingActionButton(
-                onPressed: _isProcessing ? null : _uploadAndMatchFile,
-                backgroundColor: Colors.blueGrey,
-                mini: true,
-                child: const Icon(Icons.upload_file, color: Colors.white),
-                heroTag: 'upload',
-              ),
+            const SizedBox(height: 16),
+            // Microphone recording button
+            FloatingActionButton(
+              onPressed: _isProcessing ? null : _startMatching,
+              backgroundColor: const Color(0xFF6C63FF),
+              child: _isRecording
+                  ? const Icon(Icons.stop, color: Colors.white)
+                  : const Icon(Icons.mic, color: Colors.white),
+              tooltip: 'Start Recording',
+              heroTag: 'mic',
             ),
-          ),
-          const SizedBox(height: 16),
-          // Large recording button
-          Center(
-            child: GestureDetector(
-              onTap: _isProcessing ? null : _startMatching,
-              child: Container(
-                width: 120,
-                height: 120,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color(0xFF6C63FF),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Color(0xFF6C63FF).withOpacity(0.3),
-                      blurRadius: 24,
-                      spreadRadius: 4,
-                    ),
-                  ],
-                ),
-                child: _isProcessing
-                    ? Center(
-                        child: LoadingAnimationWidget.waveDots(
-                          color: Colors.white,
-                          size: 50,
-                        ),
-                      )
-                    : const Icon(
-                        Icons.mic,
-                        color: Colors.white,
-                        size: 48,
-                      ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 32),
-        ],
+          ],
+        ),
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 

@@ -3,131 +3,137 @@ package com.example.audio_fingerprinting
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
-import android.media.AudioRecord
-import android.media.AudioFormat
+import android.media.AudioAttributes
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.MediaRecorder
+import android.media.projection.MediaProjection
+import android.os.Build
+import android.util.Log
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.embedding.android.FlutterActivity
 import java.io.File
-import java.io.FileOutputStream
-import java.io.RandomAccessFile
-import kotlin.concurrent.thread
+import java.io.IOException
 
-class SystemAudioRecorder(private val activity: Activity, private val channel: MethodChannel?) {
-    private var mediaProjectionManager: MediaProjectionManager? = null
-    private var mediaProjection: MediaProjection? = null
-    private var audioRecord: AudioRecord? = null
+class SystemAudioRecorder(private val context: Context, private val channel: MethodChannel) {
+    companion object {
+        private const val TAG = "SystemAudioRecorder"
+        const val MEDIA_PROJECTION_REQUEST_CODE = 1000
+    }
+
+    private var mediaRecorder: MediaRecorder? = null
     private var isRecording = false
-    private val sampleRate = 44100
-    private val channelConfig = AudioFormat.CHANNEL_IN_STEREO
-    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-    private val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+    private var outputFile: File? = null
 
-    init {
-        mediaProjectionManager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-    }
-
-    fun startRecording() {
-        val intent = mediaProjectionManager?.createScreenCaptureIntent()
-        activity.startActivityForResult(intent, MEDIA_PROJECTION_REQUEST_CODE)
-    }
-
-    fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == MEDIA_PROJECTION_REQUEST_CODE && resultCode == Activity.RESULT_OK && data != null) {
-            mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
-            startAudioCapture()
+    fun startRecording(mediaProjection: MediaProjection) {
+        if (isRecording) {
+            Log.d(TAG, "Recording already in progress")
+            return
         }
-    }
 
-    private fun startAudioCapture() {
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.REMOTE_SUBMIX,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize
-        )
+        try {
+            Log.d(TAG, "Starting new recording")
+            outputFile = File(context.getExternalFilesDir(null), "recordings").apply { mkdirs() }
+                .resolve("recording_${System.currentTimeMillis()}.m4a")
+            Log.d(TAG, "Will save recording to: ${outputFile?.absolutePath}")
 
-        isRecording = true
-        val recordingFile = File(activity.cacheDir, "system_audio.wav")
-        
-        // Start a timer to stop recording after 10 seconds
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            if (isRecording) {
-                stopRecording()
-            }
-        }, 10000) // 10 seconds
-        
-        thread {
-            try {
-                val buffer = ByteArray(bufferSize)
-                audioRecord?.startRecording()
+            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+            Log.d(TAG, "Created audio capture configuration")
 
-                FileOutputStream(recordingFile).use { output ->
-                    // Write WAV header
-                    writeWavHeader(output, sampleRate, 2, 16)
-
-                    while (isRecording) {
-                        val read = audioRecord?.read(buffer, 0, bufferSize) ?: 0
-                        if (read > 0) {
-                            output.write(buffer, 0, read)
-                        }
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }.apply {
+                // Only use capture config on Android 10 (Q) and above
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        Log.d(TAG, "Setting audio capture config for Android Q+")
+                        javaClass.getMethod("setAudioPlaybackCaptureConfig", AudioPlaybackCaptureConfiguration::class.java)
+                            .invoke(this, config)
+                        Log.d(TAG, "Successfully set audio capture config")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to set capture config: ${e.message}")
+                        throw Exception("Failed to configure audio capture: ${e.message}")
                     }
+                } else {
+                    Log.d(TAG, "Android version below Q, skipping capture config")
+                }
+                Log.d(TAG, "Configuring MediaRecorder")
+                setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(128000)
+                setAudioSamplingRate(44100)
+                setOutputFile(outputFile?.absolutePath)
+                Log.d(TAG, "MediaRecorder configured successfully")
 
-                    // Update WAV header with final size
-                    updateWavHeader(recordingFile)
+                try {
+                    prepare()
+                } catch (e: IOException) {
+                    Log.e("SystemAudioRecorder", "prepare() failed: ${e.message}")
+                    throw e
                 }
 
-                activity.runOnUiThread {
-                    channel?.invokeMethod("onRecordingComplete", recordingFile.absolutePath)
-                }
-            } catch (e: Exception) {
-                activity.runOnUiThread {
-                    channel?.invokeMethod("onRecordingError", e.message)
-                }
+                start()
             }
+
+            isRecording = true
+
+        } catch (e: Exception) {
+            (context as? Activity)?.runOnUiThread {
+                channel.invokeMethod("onRecordingError", e.message ?: "Unknown error")
+            }
+            cleanup()
         }
     }
 
     fun stopRecording() {
-        isRecording = false
-        audioRecord?.stop()
-        audioRecord?.release()
-        mediaProjection?.stop()
+        if (!isRecording) return
+
+        try {
+            isRecording = false
+            val currentFile = outputFile // Store reference before cleanup
+            
+            try {
+                mediaRecorder?.apply {
+                    stop()
+                    release()
+                }
+            } catch (e: Exception) {
+                println("Error stopping MediaRecorder: ${e.message}")
+            }
+            mediaRecorder = null
+
+            currentFile?.let { file ->
+                if (file.exists() && file.length() > 0) {
+                    (context as? Activity)?.runOnUiThread {
+                        channel.invokeMethod("onRecordingComplete", file.absolutePath)
+                    }
+                } else {
+                    throw Exception("Recording file is empty or does not exist")
+                }
+            }
+        } catch (e: Exception) {
+            (context as? Activity)?.runOnUiThread {
+                channel.invokeMethod("onRecordingError", "Error stopping recording: ${e.message}")
+            }
+        } finally {
+            cleanup()
+        }
     }
 
-    private fun writeWavHeader(output: FileOutputStream, sampleRate: Int, channels: Int, bitsPerSample: Int) {
-        output.write("RIFF".toByteArray())
-        output.write(ByteArray(4)) // Size placeholder
-        output.write("WAVE".toByteArray())
-        output.write("fmt ".toByteArray())
-        output.write(byteArrayOf(16, 0, 0, 0)) // Subchunk1Size
-        output.write(byteArrayOf(1, 0)) // AudioFormat (PCM)
-        output.write(byteArrayOf(channels.toByte(), 0)) // NumChannels
-        output.write(intToByteArray(sampleRate)) // SampleRate
-        output.write(intToByteArray(sampleRate * channels * bitsPerSample / 8)) // ByteRate
-        output.write(byteArrayOf((channels * bitsPerSample / 8).toByte(), 0)) // BlockAlign
-        output.write(byteArrayOf(bitsPerSample.toByte(), 0)) // BitsPerSample
-        output.write("data".toByteArray())
-        output.write(ByteArray(4)) // Subchunk2Size placeholder
-    }
-
-    private fun updateWavHeader(file: File) {
-        val size = file.length()
-        val raf = RandomAccessFile(file, "rw")
-        
-        // Update RIFF chunk size
-        raf.seek(4L)
-        raf.write(intToByteArray((size - 8).toInt()))
-        
-        // Update data chunk size
-        raf.seek(40L)
-        raf.write(intToByteArray((size - 44).toInt()))
-        
-        raf.close()
+    private fun cleanup() {
+        try {
+            isRecording = false
+            mediaRecorder?.release()
+            mediaRecorder = null
+        } catch (e: Exception) {
+            // Ignore cleanup errors
+        }
     }
 
     private fun intToByteArray(value: Int): ByteArray {
@@ -139,7 +145,5 @@ class SystemAudioRecorder(private val activity: Activity, private val channel: M
         )
     }
 
-    companion object {
-        const val MEDIA_PROJECTION_REQUEST_CODE = 1000
-    }
+
 }

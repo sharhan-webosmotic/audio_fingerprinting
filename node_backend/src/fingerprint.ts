@@ -196,46 +196,33 @@ export class Codegen extends Transform {
   }
 
   private preprocessAudio(signal: Float32Array): Float32Array {
-    // Step 1: Calculate current noise floor with enhanced sensitivity
     if (this.adaptiveThreshold) {
       this.noiseFloor = this.calculateNoiseFloor(signal);
     }
-
-    // Step 2: Normalize amplitude
     const maxAmp = Math.max(...Array.from(signal).map(Math.abs));
-    if (maxAmp === 0) return signal; // Avoid division by zero
+    if (maxAmp === 0) return signal;
     const normalized = signal.map((s) => s / maxAmp);
 
-    // Step 3: Apply spectral subtraction for noise reduction
-    const windowSize = 32; // Small window for better temporal resolution
+    const windowSize = 32;
     const processed = new Float32Array(normalized.length);
 
     for (let i = 0; i < normalized.length; i++) {
-      // Calculate local noise level in the window
       const start = Math.max(0, i - windowSize);
       const end = Math.min(normalized.length, i + windowSize);
       const window = normalized.slice(start, end);
       const localNoiseFloor = this.calculateLocalNoise(window);
-
-      // Enhanced noise gate with soft threshold
-      const noiseGate = Math.max(this.noiseFloor || 0.1, localNoiseFloor);
+      const noiseGate = Math.max(this.noiseFloor || 0.1, localNoiseFloor * 2.0); // Stronger noise gate
       const signalStrength = Math.abs(normalized[i]);
 
       if (signalStrength < noiseGate) {
-        processed[i] = 0; // Complete noise reduction
+        processed[i] = 0;
       } else {
-        // Soft thresholding for smoother transition
         const reduction = Math.min((signalStrength - noiseGate) / noiseGate, 1);
         processed[i] = normalized[i] * reduction;
       }
     }
 
-    // Step 4: Apply median filter to remove impulse noise
-    const medianFiltered = this.applyMedianFilter(processed, 3);
-
-    // Save processed signal for later use
-    this.processedSignal = medianFiltered;
-    return medianFiltered;
+    return this.applyMedianFilter(processed, 3);
   }
 
   private calculateLocalNoise(window: Float32Array): number {

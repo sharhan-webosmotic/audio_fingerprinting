@@ -24,7 +24,8 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>> matchAudio(String audioPath, {bool isLive = false}) async {
+  Future<Map<String, dynamic>> matchAudio(String audioPath,
+      {bool isLive = false}) async {
     try {
       final uri = Uri.parse('$baseUrl/match');
       final request = http.MultipartRequest('POST', uri);
@@ -44,7 +45,7 @@ class ApiService {
           await http.MultipartFile('file', stream, length, filename: filename);
 
       request.files.add(multipartFile);
-      
+
       // Only set isLive field for live recordings
       if (isLive) {
         request.fields['isLive'] = 'true';
